@@ -23,11 +23,12 @@ func main() {
 	var (
 		ammoFileName = flag.String("ammo", "", ".ammo file name")
 		target       = flag.String("target", "127.0.0.1:80", "target")
-		nWorkers     = flag.Int("w", 32, "number of connections")
+		nWorkers     = flag.Int("w", 1000, "number of workers")
 		lowRPS       = flag.Float64("low", 200, "RPS to start")
 		highRPS      = flag.Float64("high", 2000, "RPS to finish")
 		duration     = flag.Duration("d", time.Second*120, "test duration")
-		cycle        = flag.Bool("cycle", false, "cycle requests if needed (if not - exit with error)")
+		cycle        = flag.Bool("cycle", false, "cycle requests if needed (when not specified - exit with error if there is not enought requests to produce the specified load)")
+		timeout      = flag.Duration("timeout", time.Second*2, "request timeout")
 	)
 
 	flag.Parse()
@@ -48,6 +49,14 @@ func main() {
 
 	// load requests to RAM
 	requests := ParseRequests(*ammoFileName)
+
+	if !*cycle {
+		neededRequestsCount := int((*lowRPS + (*highRPS-*lowRPS)/2) * duration.Seconds())
+		if len(requests) < neededRequestsCount {
+			log.Fatalf("Ammo file contains %d requests, but %d requests are needed to produce %d->%d load during %s. Generate more bullets or use -cycle if requests are idempotempt.",
+				len(requests), neededRequestsCount, int(*lowRPS), int(*highRPS), duration)
+		}
+	}
 
 	statChan := make(chan time.Duration)
 	client := &fasthttp.HostClient{Addr: *target}
@@ -88,7 +97,7 @@ func main() {
 	for i := 0; i < *nWorkers; i++ {
 		go func() {
 			defer wgWorkers.Done()
-			SendRequests(ctx, client, reqChan, lance, statChan)
+			SendRequests(ctx, client, reqChan, lance, statChan, *timeout)
 		}()
 	}
 
@@ -103,7 +112,6 @@ func main() {
 	reqCancel()
 	wgWorkers.Wait()
 
-	//cancel()
 	close(statChan)
 	wgStat.Wait()
 
@@ -171,7 +179,9 @@ func CycleRequests(ctx context.Context, requests []fasthttp.Request, ch chan *fa
 	}
 }
 
-func SendRequests(ctx context.Context, client *fasthttp.HostClient, reqChan chan *fasthttp.Request, lance chan time.Duration, stat chan time.Duration) {
+func SendRequests(ctx context.Context, client *fasthttp.HostClient,
+	reqChan chan *fasthttp.Request, lance chan time.Duration,
+	stat chan time.Duration, timeout time.Duration) {
 
 	var resp fasthttp.Response
 
@@ -190,7 +200,7 @@ func SendRequests(ctx context.Context, client *fasthttp.HostClient, reqChan chan
 				}
 			}
 			t0 := time.Now()
-			if err := client.Do(req, &resp); err != nil {
+			if err := client.DoTimeout(req, &resp, timeout); err != nil {
 				log.Fatal("request failed: ", err)
 			}
 			stat <- time.Since(t0)
